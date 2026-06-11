@@ -1,7 +1,10 @@
 """
 app.py  —  Nematode Community Explorer  (Streamlit)
 ====================================================
-Step 1: File upload, column mapping, label parsing, filters, stacked bar
+CHANGES in this version:
+  • Phylum filter: multiselect — choose which phyla to include
+    (auto-populated from data, works on any phylum column)
+  • Removed: is-nematode flag column + filter checkbox
 
 INSTALL:
     pip install streamlit pandas numpy matplotlib scipy scikit-learn openpyxl
@@ -10,9 +13,8 @@ RUN:
     streamlit run app.py
 
 DEPLOY (free):
-    1. Push this file to a GitHub repo
-    2. Go to https://streamlit.io/cloud
-    3. Connect repo → deploy → share the URL
+    1. Push this file + requirements.txt to GitHub
+    2. Go to https://streamlit.io/cloud → connect repo → deploy → share URL
 """
 
 import re
@@ -165,8 +167,7 @@ def parse_labels(df, regex, tr_a_chars, tr_d_chars):
     for lbl in df["_label"].astype(str):
         m = pattern.match(lbl)
         if not m:
-            raise ValueError(
-                f"Label '{lbl}' does not match regex:\n{regex}")
+            raise ValueError(f"Label '{lbl}' does not match regex:\n{regex}")
         sites.append(int(m.group("site")))
         treatments.append(m.group("treatment"))
         reps.append(int(m.group("rep")))
@@ -190,8 +191,7 @@ st.sidebar.markdown("---")
 
 # ── 1. Upload ─────────────────────────────────────────────────────────────────
 st.sidebar.header("① Upload data")
-uploaded = st.sidebar.file_uploader(
-    "Excel or CSV file", type=["xlsx", "xls", "csv"])
+uploaded = st.sidebar.file_uploader("Excel or CSV file", type=["xlsx", "xls", "csv"])
 
 @st.cache_data
 def load_file(file_bytes, file_name):
@@ -217,29 +217,22 @@ def first_match(candidates, pool, fallback="(none)"):
 
 # ── 2. Column mapping ─────────────────────────────────────────────────────────
 st.sidebar.header("② Column mapping")
-reads_col  = st.sidebar.selectbox("Read counts *",
-    none_cols,
+reads_col  = st.sidebar.selectbox("Read counts *", none_cols,
     index=none_cols.index(first_match(
-        ["total supporting reads","reads","count"], all_cols)))
-label_col  = st.sidebar.selectbox("Sample label *",
-    none_cols,
+        ["total supporting reads", "reads", "count"], all_cols)))
+label_col  = st.sidebar.selectbox("Sample label *", none_cols,
     index=none_cols.index(first_match(
-        ["sites","label","sample","sample_id"], all_cols)))
-taxon_col  = st.sidebar.selectbox("Species / taxon *",
-    none_cols,
+        ["sites", "label", "sample", "sample_id"], all_cols)))
+taxon_col  = st.sidebar.selectbox("Species / taxon *", none_cols,
     index=none_cols.index(first_match(
-        ["blast_species","species","taxon"], all_cols)))
-phylum_col = st.sidebar.selectbox("Phylum",
-    none_cols,
-    index=none_cols.index(first_match(["tax_phylum","phylum"], all_cols)))
-nema_col   = st.sidebar.selectbox("Is-nematode flag",
-    none_cols,
+        ["blast_species", "species", "taxon"], all_cols)))
+phylum_col = st.sidebar.selectbox("Phylum column", none_cols,
     index=none_cols.index(first_match(
-        ["is nematode","is_nematode","nematode"], all_cols)))
+        ["tax_phylum", "phylum"], all_cols)))
 
 # ── 3. Label parsing ──────────────────────────────────────────────────────────
 st.sidebar.header("③ Label parsing")
-regex_val = st.sidebar.text_input(
+regex_val  = st.sidebar.text_input(
     "Regex (named groups: site, treatment, rep)",
     value=r"^(?P<site>[0-9]+)(?P<treatment>[aAdD])(?P<rep>[0-9]+)$")
 tr_a_chars = st.sidebar.text_input("Treatment A chars (comma-sep)", value="a,A")
@@ -247,8 +240,19 @@ tr_d_chars = st.sidebar.text_input("Treatment D chars (comma-sep)", value="d,D")
 
 # ── 4. Filters ────────────────────────────────────────────────────────────────
 st.sidebar.header("④ Filters")
-only_nema = st.sidebar.checkbox(
-    'Only nematode rows (flag = "yes"/"true"/"1")', value=False)
+
+# Phylum filter — dynamic, populated from data
+if phylum_col != "(none)" and phylum_col in df_raw.columns:
+    available_phyla = sorted(df_raw[phylum_col].dropna().astype(str).unique().tolist())
+    selected_phyla  = st.sidebar.multiselect(
+        "Include phyla",
+        options=available_phyla,
+        default=available_phyla,
+        help="Only rows matching selected phyla will be used in all plots.")
+else:
+    selected_phyla = None
+    st.sidebar.info("Set a Phylum column in ② to enable phylum filtering.")
+
 sites_input = st.sidebar.text_input(
     "Sites to include (comma-sep, empty = all)", value="")
 
@@ -268,17 +272,20 @@ plot_type = st.sidebar.radio("Choose plot", [
 
 @st.cache_data
 def build_df(file_bytes, file_name,
-             reads_col, label_col, taxon_col, nema_col,
-             only_nema, sites_input, regex_val, tr_a_chars, tr_d_chars):
+             reads_col, label_col, taxon_col, phylum_col,
+             selected_phyla, sites_input, regex_val, tr_a_chars, tr_d_chars):
     df = load_file(file_bytes, file_name)
 
     if reads_col == "(none)" or label_col == "(none)" or taxon_col == "(none)":
         return None, "Set Read counts, Sample label, and Species/taxon columns."
 
+    # reads > 0
     df = df[pd.to_numeric(df[reads_col], errors="coerce").fillna(0) > 0].copy()
 
-    if only_nema and nema_col != "(none)" and nema_col in df.columns:
-        df = df[df[nema_col].astype(str).str.lower().isin(["yes","true","1"])]
+    # phylum filter
+    if (phylum_col != "(none)" and phylum_col in df.columns
+            and selected_phyla is not None and len(selected_phyla) > 0):
+        df = df[df[phylum_col].astype(str).isin(selected_phyla)]
 
     df["_label"] = df[label_col].astype(str)
 
@@ -290,7 +297,7 @@ def build_df(file_bytes, file_name,
     if sites_input.strip():
         try:
             sites = [int(s.strip()) for s in
-                     sites_input.replace(";",",").split(",") if s.strip()]
+                     sites_input.replace(";", ",").split(",") if s.strip()]
             df = df[df["_site"].isin(sites)]
         except:
             return None, "Sites filter: enter comma-separated integers."
@@ -300,14 +307,14 @@ def build_df(file_bytes, file_name,
 
     return df, None
 
-# we need raw bytes again for caching — re-read
 uploaded.seek(0)
 raw_bytes = uploaded.read()
 
 df, err = build_df(
     raw_bytes, uploaded.name,
-    reads_col, label_col, taxon_col, nema_col,
-    only_nema, sites_input, regex_val, tr_a_chars, tr_d_chars)
+    reads_col, label_col, taxon_col, phylum_col,
+    tuple(selected_phyla) if selected_phyla is not None else None,
+    sites_input, regex_val, tr_a_chars, tr_d_chars)
 
 if err:
     st.error(err)
@@ -318,20 +325,26 @@ if err:
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.title("🪱 Nematode Community Explorer")
+
+# show active phylum filter as a badge
+phylum_badge = ""
+if selected_phyla is not None:
+    phylum_badge = f" · Phyla: **{', '.join(selected_phyla)}**"
+
 st.caption(
     f"**{uploaded.name}** — {len(df):,} rows · "
     f"{df['_site'].nunique()} sites · "
     f"{df['_treatment'].nunique()} treatments · "
-    f"{df['_rep'].nunique()} replicates")
+    f"{df['_rep'].nunique()} replicates"
+    + phylum_badge)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PLOT OPTIONS  (in main area, above plot)
+# TAXON COLUMN CANDIDATES
 # ─────────────────────────────────────────────────────────────────────────────
 
-# collect all taxon-like columns for dropdowns
 tax_candidates = [c for c in [phylum_col, taxon_col] + obj_cols
                   if c != "(none)" and c in df.columns]
-tax_candidates = list(dict.fromkeys(tax_candidates))  # deduplicate
+tax_candidates = list(dict.fromkeys(tax_candidates))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ① STACKED BAR
@@ -339,14 +352,14 @@ tax_candidates = list(dict.fromkeys(tax_candidates))  # deduplicate
 
 if plot_type.startswith("Stacked"):
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-    comp_col  = c1.selectbox("Composition level", tax_candidates,
-                              index=tax_candidates.index(taxon_col)
-                              if taxon_col in tax_candidates else 0)
-    min_pct   = c2.number_input("Min % to show", 0.0, 50.0, 1.0, 0.5)
-    max_leg   = c3.number_input("Max taxa in legend", 1, 60, 20, 1)
-    show_pct  = c4.checkbox("% labels in bars", value=True)
-    show_bc   = st.checkbox("Show Bray-Curtis similarity + significance below bars",
-                             value=True)
+    comp_col = c1.selectbox("Composition level", tax_candidates,
+                             index=tax_candidates.index(taxon_col)
+                             if taxon_col in tax_candidates else 0)
+    min_pct  = c2.number_input("Min % to show", 0.0, 50.0, 1.0, 0.5)
+    max_leg  = c3.number_input("Max taxa in legend", 1, 60, 20, 1)
+    show_pct = c4.checkbox("% labels in bars", value=True)
+    show_bc  = st.checkbox("Show Bray-Curtis similarity + significance below bars",
+                            value=True)
 
     if comp_col not in df.columns:
         st.error(f"Column '{comp_col}' not found."); st.stop()
@@ -400,15 +413,14 @@ if plot_type.startswith("Stacked"):
     ax.set_title(f"Community composition (A vs D) — {comp_col}",
                  fontsize=13, fontweight="bold")
     ax.grid(axis="y", linestyle="--", alpha=0.3)
-    ax.spines[["top","right"]].set_visible(False)
+    ax.spines[["top", "right"]].set_visible(False)
 
-    total_abund = {t: sum(float(r.get(t,0)) for r in rel_dict.values())
+    total_abund = {t: sum(float(r.get(t, 0)) for r in rel_dict.values())
                    for t in all_taxa}
     top_taxa = sorted(all_taxa, key=lambda t: total_abund[t], reverse=True)[:int(max_leg)]
     handles  = [mpatches.Patch(facecolor=color_map[t], edgecolor="white",
                                linewidth=0.5, label=t) for t in top_taxa]
-    ax.legend(handles=handles,
-              title=f"Top {len(top_taxa)} taxa",
+    ax.legend(handles=handles, title=f"Top {len(top_taxa)} taxa",
               title_fontsize=8, fontsize=7,
               bbox_to_anchor=(1.01, 1), loc="upper left",
               frameon=True, edgecolor="#ccc")
@@ -423,8 +435,8 @@ if plot_type.startswith("Stacked"):
             rel_d = rel_dict.get((s, "D"))
             if rel_a is None or rel_d is None: continue
             all_sp = sorted(set(rel_a.index) | set(rel_d.index))
-            va = np.array([float(rel_a.get(sp,0)) for sp in all_sp])
-            vd = np.array([float(rel_d.get(sp,0)) for sp in all_sp])
+            va  = np.array([float(rel_a.get(sp, 0)) for sp in all_sp])
+            vd  = np.array([float(rel_d.get(sp, 0)) for sp in all_sp])
             sim = bc_sim(va, vd)
 
             reps_a = df_s[(df_s["_site"]==s) & (df_s["_treatment"]=="A")]
@@ -492,12 +504,12 @@ elif plot_type.startswith("Shannon div"):
 
     records = []
     if grouping == "site × treatment × replicate":
-        for (site, tr, rep), sub in df.groupby(["_site","_treatment","_rep"]):
+        for (site, tr, rep), sub in df.groupby(["_site", "_treatment", "_rep"]):
             grp = sub.groupby(sh_col)[reads_col].sum()
             records.append({"label": f"{site}{tr}{rep}", "treatment": tr,
                              "shannon": shannon_index(grp.values)})
     elif grouping == "site × treatment":
-        for (site, tr), sub in df.groupby(["_site","_treatment"]):
+        for (site, tr), sub in df.groupby(["_site", "_treatment"]):
             grp = sub.groupby(sh_col)[reads_col].sum()
             records.append({"label": f"{site}{tr}", "treatment": tr,
                              "shannon": shannon_index(grp.values)})
@@ -517,7 +529,7 @@ elif plot_type.startswith("Shannon div"):
     x   = np.arange(len(out))
     fig, ax = plt.subplots(figsize=(max(7, len(out)*0.6+2), 5))
     bars = ax.bar(x, out["shannon"],
-                  color=[tr_colors.get(t,"#888") for t in out["treatment"]],
+                  color=[tr_colors.get(t, "#888") for t in out["treatment"]],
                   edgecolor="white", linewidth=0.5, width=0.7, zorder=2)
     for bar, val in zip(bars, out["shannon"]):
         if not np.isnan(val):
@@ -530,7 +542,7 @@ elif plot_type.startswith("Shannon div"):
     ax.set_title(f"Shannon diversity — {sh_col}  [{grouping}]",
                  fontsize=12, fontweight="bold")
     ax.grid(axis="y", linestyle="--", alpha=0.3, zorder=1)
-    ax.spines[["top","right"]].set_visible(False)
+    ax.spines[["top", "right"]].set_visible(False)
     handles = [mpatches.Patch(color="#2c7bb6", label="Treatment A"),
                mpatches.Patch(color="#d7191c", label="Treatment D")]
     ax.legend(handles=handles, fontsize=9, frameon=True, edgecolor="#ccc")
@@ -561,7 +573,7 @@ elif plot_type.startswith("Shannon vs"):
         st.warning("Select at least one X-axis variable."); st.stop()
 
     records = []
-    for (site, tr), sub in df.groupby(["_site","_treatment"]):
+    for (site, tr), sub in df.groupby(["_site", "_treatment"]):
         grp = sub.groupby(sh_col)[reads_col].sum()
         rec = {"site": site, "treatment": tr,
                "shannon": shannon_index(grp.values)}
@@ -574,12 +586,12 @@ elif plot_type.startswith("Shannon vs"):
     n    = len(env_cols)
     fig, axes = plt.subplots(1, n, figsize=(5*n, 5), squeeze=False)
     axes = axes[0]
-    styles = {"A": {"color":"#2c7bb6","marker":"o"},
-              "D": {"color":"#d7191c","marker":"s"}}
+    styles = {"A": {"color": "#2c7bb6", "marker": "o"},
+              "D": {"color": "#d7191c", "marker": "s"}}
 
     for ax, env in zip(axes, env_cols):
         for tr, st_s in styles.items():
-            sub = out[out["treatment"]==tr]
+            sub = out[out["treatment"] == tr]
             x   = pd.to_numeric(sub[env], errors="coerce").values
             y   = sub["shannon"].values
             if x.size == 0: continue
@@ -589,14 +601,15 @@ elif plot_type.startswith("Shannon vs"):
             for _, row in sub.iterrows():
                 ax.annotate(str(int(row["site"])),
                             xy=(row[env], row["shannon"]),
-                            xytext=(6,4), textcoords="offset points",
+                            xytext=(6, 4), textcoords="offset points",
                             fontsize=9, fontweight="bold", color=st_s["color"])
             mask = ~np.isnan(x) & ~np.isnan(y)
             if mask.sum() >= 3 and np.nanstd(x[mask]) > 0:
                 xm, ym = x[mask], y[mask]
                 m, b   = np.polyfit(xm, ym, 1)
                 xl     = np.linspace(xm.min(), xm.max(), 100)
-                ax.plot(xl, m*xl+b, color=st_s["color"], ls="--", lw=1.5, alpha=0.7)
+                ax.plot(xl, m*xl+b, color=st_s["color"],
+                        ls="--", lw=1.5, alpha=0.7)
                 r, p  = pearsonr(xm, ym)
                 p_str = f"p={p:.3f}" if p >= 0.001 else "p<0.001"
                 off   = 0.22 if tr == "A" else 0.05
@@ -609,7 +622,7 @@ elif plot_type.startswith("Shannon vs"):
         ax.set_ylabel("Shannon H" if env == env_cols[0] else "", fontsize=10)
         ax.set_title(env, fontsize=11, fontweight="bold")
         ax.grid(True, ls="--", alpha=0.4)
-        ax.spines[["top","right"]].set_visible(False)
+        ax.spines[["top", "right"]].set_visible(False)
         if env == env_cols[0]:
             ax.legend(fontsize=9, frameon=True, edgecolor="#ccc")
 
@@ -626,24 +639,24 @@ elif plot_type.startswith("Shannon vs"):
 
 elif plot_type.startswith("NMDS"):
     c1, c2, c3, c4 = st.columns(4)
-    sh_col      = c1.selectbox("Distance level", tax_candidates,
-                                index=tax_candidates.index(taxon_col)
-                                if taxon_col in tax_candidates else 0)
-    color_by    = c2.radio("Colour by", ["treatment","site","rep"])
-    combine     = c3.checkbox("Combine replicates", value=False)
-    show_ell    = c3.checkbox("95% ellipses", value=True)
-    n_perm      = c4.number_input("PERMANOVA permutations", 99, 9999, 999, 100)
+    sh_col   = c1.selectbox("Distance level", tax_candidates,
+                             index=tax_candidates.index(taxon_col)
+                             if taxon_col in tax_candidates else 0)
+    color_by = c2.radio("Colour by", ["treatment", "site", "rep"])
+    combine  = c3.checkbox("Combine replicates", value=False)
+    show_ell = c3.checkbox("95% ellipses", value=True)
+    n_perm   = c4.number_input("PERMANOVA permutations", 99, 9999, 999, 100)
 
     mat, labels = build_community_matrix(df, sh_col, reads_col,
                                          combine_reps=combine)
     if len(mat) < 3:
         st.error("Need at least 3 samples."); st.stop()
 
-    pat = (re.compile(r"^(?P<site>[0-9]+)(?P<treatment>[A-Z])$")
-           if combine else re.compile(regex_val))
+    pat   = (re.compile(r"^(?P<site>[0-9]+)(?P<treatment>[A-Z])$")
+             if combine else re.compile(regex_val))
     a_set = set(c.strip() for c in tr_a_chars.split(","))
     d_set = set(c.strip() for c in tr_d_chars.split(","))
-    meta = []
+    meta  = []
     for lbl in labels:
         m = pat.match(lbl)
         if m:
@@ -661,62 +674,62 @@ elif plot_type.startswith("NMDS"):
     coords, stress = run_mds(dist_mat)
 
     if color_by == "treatment":
-        palette    = {"A":"#2c7bb6","D":"#d7191c"}
+        palette    = {"A": "#2c7bb6", "D": "#d7191c"}
         group_vals = meta_df["treatment"].tolist()
     elif color_by == "site":
         su      = sorted(meta_df["site"].unique())
         cmap    = plt.get_cmap("tab10")
-        palette = {s: cmap(i/max(len(su)-1,1)) for i,s in enumerate(su)}
+        palette = {s: cmap(i/max(len(su)-1, 1)) for i, s in enumerate(su)}
         group_vals = meta_df["site"].tolist()
     else:
         ru      = sorted(meta_df["rep"].unique())
         cmap    = plt.get_cmap("Set2")
-        palette = {r: cmap(i/max(len(ru)-1,1)) for i,r in enumerate(ru)}
+        palette = {r: cmap(i/max(len(ru)-1, 1)) for i, r in enumerate(ru)}
         group_vals = meta_df["rep"].tolist()
 
     fig, (ax, ax_s) = plt.subplots(1, 2, figsize=(12, 6),
-                                    gridspec_kw={"width_ratios":[3,1],"wspace":0.05})
+                                    gridspec_kw={"width_ratios": [3, 1],
+                                                 "wspace": 0.05})
     ax_s.axis("off")
 
     plotted = set()
     for i, (x, y) in enumerate(coords):
         gv     = group_vals[i]
         color  = palette.get(gv, "#888")
-        lbl    = meta_df.loc[i,"label"]
-        tr     = meta_df.loc[i,"treatment"]
+        lbl    = meta_df.loc[i, "label"]
+        tr     = meta_df.loc[i, "treatment"]
         marker = "o" if tr == "A" else "s"
         ax.scatter(x, y, color=color, marker=marker, s=110,
                    edgecolors="white", linewidths=0.8, zorder=3,
                    label=str(gv) if gv not in plotted else "")
-        ax.annotate(lbl, xy=(x,y), xytext=(6,4),
+        ax.annotate(lbl, xy=(x, y), xytext=(6, 4),
                     textcoords="offset points",
                     fontsize=8, color=color, fontweight="bold")
         plotted.add(gv)
 
     if show_ell:
         for gv, color in palette.items():
-            idx = [i for i,g in enumerate(group_vals) if g==gv]
+            idx = [i for i, g in enumerate(group_vals) if g == gv]
             if len(idx) < 3: continue
-            confidence_ellipse(coords[idx,0], coords[idx,1], ax,
+            confidence_ellipse(coords[idx, 0], coords[idx, 1], ax,
                                facecolor=color, alpha=0.12,
                                edgecolor=color, linewidth=1.5, linestyle="--")
 
-    ml = "NMDS"
-    ax.set_xlabel(f"{ml} axis 1", fontsize=11)
-    ax.set_ylabel(f"{ml} axis 2", fontsize=11)
-    ax.set_title(f"{ml} — Bray-Curtis  |  colour by {color_by}"
+    ax.set_xlabel("NMDS axis 1", fontsize=11)
+    ax.set_ylabel("NMDS axis 2", fontsize=11)
+    ax.set_title(f"NMDS — Bray-Curtis  |  colour by {color_by}"
                  + ("  [reps combined]" if combine else ""),
                  fontsize=12, fontweight="bold")
     ax.axhline(0, color="#ccc", lw=0.8, zorder=1)
     ax.axvline(0, color="#ccc", lw=0.8, zorder=1)
     ax.grid(True, ls="--", alpha=0.25, zorder=0)
-    ax.spines[["top","right"]].set_visible(False)
-    handles = [mpatches.Patch(color=c, label=str(g)) for g,c in palette.items()]
-    tr_h    = [ax.scatter([],[],marker="o",color="#555",s=60,label="Tr. A"),
-               ax.scatter([],[],marker="s",color="#555",s=60,label="Tr. D")]
+    ax.spines[["top", "right"]].set_visible(False)
+    handles = [mpatches.Patch(color=c, label=str(g)) for g, c in palette.items()]
+    tr_h    = [ax.scatter([], [], marker="o", color="#555", s=60, label="Tr. A"),
+               ax.scatter([], [], marker="s", color="#555", s=60, label="Tr. D")]
     ax.legend(handles=handles+tr_h, title=f"Colour: {color_by}",
-              fontsize=8, title_fontsize=8, frameon=True, edgecolor="#ccc",
-              loc="lower left")
+              fontsize=8, title_fontsize=8, frameon=True,
+              edgecolor="#ccc", loc="lower left")
 
     p_col   = "#c0392b" if (not np.isnan(p_val) and p_val < 0.05) else "#27ae60"
     p_str   = f"{p_val:.4f}" if not np.isnan(p_val) else "N/A"
@@ -752,21 +765,20 @@ elif plot_type.startswith("Replicate"):
     sim_col   = c1.selectbox("Taxon level for BC", tax_candidates,
                               index=tax_candidates.index(taxon_col)
                               if taxon_col in tax_candidates else 0)
-    sim_group = c2.radio("Group by",
-                         ["site × treatment", "site only"])
+    sim_group = c2.radio("Group by", ["site × treatment", "site only"])
 
     if sim_group == "site × treatment":
-        group_keys = ["_site","_treatment","_rep"]
+        group_keys = ["_site", "_treatment", "_rep"]
         label_fn   = lambda k: f"{k[0]}{k[1]}{k[2]}"
     else:
-        group_keys = ["_site","_rep"]
+        group_keys = ["_site", "_rep"]
         label_fn   = lambda k: f"Site{k[0]}_Rep{k[1]}"
 
     vecs, labels = {}, []
     for keys, sub in df.groupby(group_keys):
-        keys = keys if isinstance(keys, tuple) else (keys,)
-        lbl  = label_fn(keys)
-        grp  = sub.groupby(sim_col)[reads_col].sum()
+        keys  = keys if isinstance(keys, tuple) else (keys,)
+        lbl   = label_fn(keys)
+        grp   = sub.groupby(sim_col)[reads_col].sum()
         total = grp.sum()
         vecs[lbl] = grp / total * 100.0 if total > 0 else grp * 0.0
         labels.append(lbl)
@@ -778,13 +790,13 @@ elif plot_type.startswith("Replicate"):
     for i, la in enumerate(labels):
         for j, lb in enumerate(labels):
             if i == j:
-                mat[i,j] = 100.0
+                mat[i, j] = 100.0
             elif i < j:
-                va = np.array([float(vecs[la].get(t,0)) for t in all_taxa])
-                vb = np.array([float(vecs[lb].get(t,0)) for t in all_taxa])
+                va = np.array([float(vecs[la].get(t, 0)) for t in all_taxa])
+                vb = np.array([float(vecs[lb].get(t, 0)) for t in all_taxa])
                 v  = bc_sim(va, vb)
-                mat[i,j] = v if not np.isnan(v) else 0.0
-                mat[j,i] = mat[i,j]
+                mat[i, j] = v if not np.isnan(v) else 0.0
+                mat[j, i] = mat[i, j]
 
     cell  = max(0.55, min(1.2, 12.0/n))
     fig_w = max(8, n*cell+3)
@@ -792,14 +804,14 @@ elif plot_type.startswith("Replicate"):
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
     cmap_bc = mcolors.LinearSegmentedColormap.from_list(
-        "bc", ["#c0392b","#f39c12","#27ae60"])
+        "bc", ["#c0392b", "#f39c12", "#27ae60"])
     im = ax.imshow(mat, cmap=cmap_bc, vmin=0, vmax=100, aspect="auto")
     fig.colorbar(im, ax=ax, label="Bray-Curtis similarity (%)",
                  fraction=0.03, pad=0.02)
 
     for i in range(n):
         for j in range(n):
-            val = mat[i,j]
+            val     = mat[i, j]
             txt_col = "white" if (val < 35 or val > 80) else "black"
             ax.text(j, i, f"{val:.0f}",
                     ha="center", va="center",
@@ -822,7 +834,7 @@ elif plot_type.startswith("Replicate"):
     if sim_group == "site × treatment":
         prev = None
         for j, lbl in enumerate(labels):
-            m = re.match(r"^(\d+)", lbl)
+            m    = re.match(r"^(\d+)", lbl)
             site = m.group(1) if m else None
             if site != prev and j > 0:
                 ax.axhline(j-0.5, color="white", lw=2)
@@ -842,7 +854,6 @@ elif plot_type.startswith("Replicate"):
     st.download_button("⬇️ Download PNG", fig_to_bytes(fig),
                        file_name="similarity_table.png", mime="image/png")
 
-    # also show as dataframe table
     st.subheader("Similarity values (table)")
     sim_df = pd.DataFrame(mat, index=labels, columns=labels).round(1)
     st.dataframe(sim_df.style.background_gradient(cmap="RdYlGn", vmin=0, vmax=100),
